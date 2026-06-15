@@ -82,8 +82,32 @@ def save_state(state):
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
+def _make_session():
+    """Create a session and prime it by visiting a normal page first, so we
+    pick up any cookies the API endpoints expect. The browser had a session;
+    a bare server-side request does not, which can cause 400/403."""
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    try:
+        s.get("https://www.abc.virginia.gov/products/all-products",
+              timeout=30)
+    except requests.RequestException as e:
+        print(f"[warn] priming request failed (continuing anyway): {e}")
+    return s
+
+
+SESSION = None
+
+
 def _get(url, params):
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    global SESSION
+    if SESSION is None:
+        SESSION = _make_session()
+    r = SESSION.get(url, params=params, timeout=30)
+    if r.status_code >= 400:
+        # Servers usually explain a 400 in the body — surface it.
+        print(f"[http {r.status_code}] {r.url}")
+        print(f"[http body] {r.text[:1000]}")
     r.raise_for_status()
     return r.json()
 
