@@ -4,7 +4,7 @@ on:
   schedule:
     # Every 15 minutes. Cron is in UTC. GitHub may delay scheduled runs
     # during peak load, so don't expect perfectly even spacing.
-    - cron: "*/15 * * * *"
+    - cron: "*/1 * * * *"
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
 
 # Allow the workflow to push the updated state.json back to the repo.
