@@ -200,6 +200,25 @@ def send_text(subject, body):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # --- config diagnostics ---------------------------------------------
+    # Print whether each config value arrived. Secrets are masked by GitHub
+    # in logs, so showing presence/length is safe and tells us if a secret
+    # is missing or misnamed.
+    def _diag(label, val, secret=False):
+        if not val:
+            print(f"[config] {label}: <MISSING/EMPTY>")
+        elif secret:
+            print(f"[config] {label}: set (length {len(val)})")
+        else:
+            print(f"[config] {label}: {val!r}")
+
+    _diag("WATCH_PRODUCTS", os.environ.get("WATCH_PRODUCTS"))
+    _diag("WATCH_STORES", os.environ.get("WATCH_STORES"))
+    _diag("SMS_TO", os.environ.get("SMS_TO"), secret=True)
+    _diag("SMTP_USER", os.environ.get("SMTP_USER"), secret=True)
+    _diag("SMTP_PASS", os.environ.get("SMTP_PASS"), secret=True)
+    # --------------------------------------------------------------------
+
     products = [p.strip() for p in
                 os.environ.get("WATCH_PRODUCTS", "Eagle Rare").split(",")
                 if p.strip()]
@@ -208,15 +227,24 @@ def main():
                                     "Blacksburg,Christiansburg").split(",")
                      if s.strip()]
 
+    print(f"[config] resolved products to watch: {products}")
+    print(f"[config] resolved store filters: {store_filters}")
+
     state = load_state()
     state.setdefault("codes", {})       # product name -> code
     state.setdefault("qty", {})         # "code|store" -> last qty
     alerts = []
 
     for name in products:
+        print(f"[checking] {name}")
         code = state["codes"].get(name)
         if not code:
-            code, label = search_product_code(name)
+            try:
+                code, label = search_product_code(name)
+            except Exception as e:
+                print(f"[error] product search failed for {name}: "
+                      f"{type(e).__name__}: {e}")
+                continue
             if not code:
                 print(f"[skip] could not resolve product: {name}")
                 continue
@@ -225,9 +253,12 @@ def main():
 
         try:
             rows = fetch_inventory(code)
-        except requests.RequestException as e:
-            print(f"[error] inventory fetch failed for {name}: {e}")
+        except Exception as e:
+            print(f"[error] inventory fetch failed for {name}: "
+                  f"{type(e).__name__}: {e}")
             continue
+
+        print(f"[info] {name}: got {len(rows)} store rows before filtering")
 
         for store, qty in rows:
             # Only stores matching our city filters
