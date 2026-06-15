@@ -33,11 +33,8 @@ jobs:
 
       - name: Run watcher
         env:
-          # These two are NOT sensitive (public store IDs / product codes).
-          # Reading them from Variables (not Secrets) means GitHub won't mask
-          # digits in the logs, so your bottle counts print as real numbers.
-          WATCH_PRODUCTS: ${{ vars.WATCH_PRODUCTS }}
-          STORE_NUMBERS: ${{ vars.STORE_NUMBERS }}
+          WATCH_PRODUCTS: ${{ secrets.WATCH_PRODUCTS }}
+          STORE_NUMBERS: ${{ secrets.STORE_NUMBERS }}
           SMS_TO: ${{ secrets.SMS_TO }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
