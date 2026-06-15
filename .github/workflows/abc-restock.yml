@@ -43,6 +43,8 @@ jobs:
           ONLY_WATCHED: ${{ secrets.ONLY_WATCHED }}
           # Set DEBUG_JSON secret to "1" temporarily to dump raw API JSON.
           DEBUG_JSON: ${{ secrets.DEBUG_JSON }}
+          # Set TEST_SMS secret to "1" to send one test text and exit.
+          TEST_SMS: ${{ secrets.TEST_SMS }}
         run: python abc_restock.py
 
       - name: Commit updated state
