@@ -34,10 +34,15 @@ jobs:
       - name: Run watcher
         env:
           WATCH_PRODUCTS: ${{ secrets.WATCH_PRODUCTS }}
-          WATCH_STORES: ${{ secrets.WATCH_STORES }}
+          STORE_NUMBERS: ${{ secrets.STORE_NUMBERS }}
           SMS_TO: ${{ secrets.SMS_TO }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          # Set ONLY_WATCHED secret to "0" to also track nearby stores the
+          # API volunteers; default (unset) tracks only STORE_NUMBERS.
+          ONLY_WATCHED: ${{ secrets.ONLY_WATCHED }}
+          # Set DEBUG_JSON secret to "1" temporarily to dump raw API JSON.
+          DEBUG_JSON: ${{ secrets.DEBUG_JSON }}
         run: python abc_restock.py
 
       - name: Commit updated state
