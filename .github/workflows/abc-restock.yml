@@ -33,11 +33,18 @@ jobs:
 
       - name: Run watcher
         env:
-          WATCH_PRODUCTS: ${{ secrets.WATCH_PRODUCTS }}
-          STORE_NUMBERS: ${{ secrets.STORE_NUMBERS }}
+          # These two are NOT sensitive (public store IDs / product codes).
+          # Reading them from Variables (not Secrets) means GitHub won't mask
+          # digits in the logs, so your bottle counts print as real numbers.
+          WATCH_PRODUCTS: ${{ vars.WATCH_PRODUCTS }}
+          STORE_NUMBERS: ${{ vars.STORE_NUMBERS }}
           SMS_TO: ${{ secrets.SMS_TO }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          # SMTP server — defaults to Gmail in the script. For iCloud set
+          # SMTP_HOST=smtp.mail.me.com and SMTP_PORT=587 as secrets.
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           # Set ONLY_WATCHED secret to "0" to also track nearby stores the
           # API volunteers; default (unset) tracks only STORE_NUMBERS.
           ONLY_WATCHED: ${{ secrets.ONLY_WATCHED }}
