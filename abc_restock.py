@@ -226,6 +226,14 @@ def parse_stores():
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # TEST_SMS=1 sends a single test text and exits — use this once to verify
+    # your email-to-SMS setup works, then unset it.
+    if os.environ.get("TEST_SMS") == "1":
+        print("[test] TEST_SMS=1 -> sending a test message")
+        send_text("ABC watcher test: texting works. Reply not needed.")
+        print("[test] done — unset TEST_SMS to resume normal watching.")
+        return
+
     products = parse_products()            # code -> name
     watched = parse_stores()               # list of store-number strings
     watched_set = set(watched)
