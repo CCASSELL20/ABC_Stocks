@@ -2,65 +2,73 @@
 """
 Virginia ABC restock watcher.
 
-Watches given products at the Blacksburg and Christiansburg ABC stores and
-sends a text (via email-to-SMS gateway) when a store's on-hand quantity
-INCREASES versus the last time it was checked (i.e. a restock).
+Watches given products at specific ABC stores and sends a text (via
+email-to-SMS gateway) when a store's on-hand quantity INCREASES versus the
+last check (i.e. a restock).
 
-Designed to run headless on GitHub Actions on a cron schedule. State (last
-seen quantities) persists in state.json, which the workflow commits back to
-the repo after each run.
+Confirmed API (from the live site):
+  https://www.abc.virginia.gov/webapi/inventory/mystore
+      ?storeNumbers=327,...&productCodes=017766,...
 
-Config via environment variables (set as GitHub repo Secrets):
-  WATCH_PRODUCTS   Comma-separated product names, e.g. "Eagle Rare,Blanton's"
-  WATCH_STORES     Comma-separated city names to match store addresses against.
-                   Default: "Blacksburg,Christiansburg"
-  SMS_TO           Your SMS gateway address, e.g. "5551234567@tmomail.net"
-  SMTP_USER        Gmail address you send FROM
-  SMTP_PASS        Gmail app password (NOT your normal password)
-  SMTP_HOST        Default smtp.gmail.com
-  SMTP_PORT        Default 587
+Confirmed response shape:
+  {
+    "products": [
+      {
+        "productId": "017766",
+        "storeInfo":   { "storeId": 327, "quantity": 0, "city": "Blacksburg", ... },
+        "nearbyStores": [ { "storeId": 269, "quantity": 1, "city": "Roanoke", ... }, ... ]
+      }
+    ]
+  }
 
-Nothing here is ABC-specific-secret; product codes and store numbers are
-discovered at runtime by searching the public site.
+Eagle Rare product code = 017766. Store 327 = Blacksburg (S. Main St).
+
+Runs headless on GitHub Actions; state persists in state.json which the
+workflow commits back each run.
+
+Config via environment variables (GitHub repo Secrets):
+  WATCH_PRODUCTS  "Name=Code" pairs, e.g. "Eagle Rare=017766,Blanton's=000378"
+  STORE_NUMBERS   Comma-separated store numbers, e.g. "327,414,67,195,356"
+  SMS_TO          SMS gateway address, e.g. "5401234567@tmomail.net"
+  SMTP_USER       Gmail address to send FROM
+  SMTP_PASS       Gmail app password (16 chars, no spaces)
+  SMTP_HOST       default smtp.gmail.com
+  SMTP_PORT       default 587
+  ONLY_WATCHED    if "1" (default), ignore the API's extra "nearbyStores" and
+                  only track the store numbers you listed. Set "0" to also
+                  track whatever nearby stores the API volunteers.
+  DEBUG_JSON      if "1", print raw API response (use on first run)
 """
 
 import os
-import sys
 import json
-import time
 import smtplib
 from email.message import EmailMessage
 
 import requests
 
 STATE_FILE = "state.json"
-
-# The Virginia ABC store/product data is served by a backend JSON API that the
-# website's front-end calls. These endpoints are public (no auth) and are what
-# the site itself hits. If ABC changes their site, update these two constants.
-BASE = "https://www.abc.virginia.gov"
-# Product search: returns products matching a text query, including the
-# product code/number used for inventory lookups.
-PRODUCT_SEARCH_URL = BASE + "/webapi/api/commerce/products/search"
-# Store inventory: given a product code, returns per-store on-hand quantities
-# for the nearest stores (or all stores, depending on params).
-STORE_INVENTORY_URL = BASE + "/webapi/api/commerce/products/{code}/inventory"
+MYSTORE_URL = "https://www.abc.virginia.gov/webapi/inventory/mystore"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/124.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": BASE + "/products/all-products",
+    "Referer": "https://www.abc.virginia.gov/products/all-products",
+    "X-Requested-With": "XMLHttpRequest",
 }
+
+DEBUG = os.environ.get("DEBUG_JSON") == "1"
+ONLY_WATCHED = os.environ.get("ONLY_WATCHED", "1") != "0"
 
 
 # ---------------------------------------------------------------------------
-# State persistence
+# State
 # ---------------------------------------------------------------------------
 def load_state():
     try:
-        with open(STATE_FILE, "r") as f:
+        with open(STATE_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -72,216 +80,153 @@ def save_state(state):
 
 
 # ---------------------------------------------------------------------------
-# ABC API access
-#
-# NOTE ON ROBUSTNESS: ABC has changed their API shape over time and the JSON
-# field names are not guaranteed stable. Rather than hard-code one schema, the
-# helpers below search the returned JSON flexibly for the fields we need. If a
-# call ever returns an unexpected shape, the script logs the raw payload so you
-# can adjust the field lookups quickly.
+# API
 # ---------------------------------------------------------------------------
-def _get(url, params=None):
+def _get(url, params):
     r = requests.get(url, headers=HEADERS, params=params, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-def _find_first(obj, keys):
-    """Depth-first search for the first value whose key matches any in `keys`
-    (case-insensitive). Returns None if not found."""
-    keys_l = {k.lower() for k in keys}
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.lower() in keys_l and not isinstance(v, (dict, list)):
-                return v
-        for v in obj.values():
-            found = _find_first(v, keys)
-            if found is not None:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = _find_first(item, keys)
-            if found is not None:
-                return found
-    return None
+def _store_row(product_code, store_obj):
+    """Turn one storeInfo/nearbyStore object into our normalized row."""
+    return {
+        "product_code": str(product_code),
+        "store_number": str(store_obj.get("storeId", "?")),
+        "city": store_obj.get("city") or "",
+        "address": store_obj.get("address") or "",
+        "qty": int(store_obj.get("quantity", 0)),
+    }
 
 
-def _iter_records(obj):
-    """Yield dicts from a response that look like product/store records
-    (i.e. dicts that contain identifying fields)."""
-    if isinstance(obj, dict):
-        # Common envelope keys
-        for key in ("products", "items", "results", "data", "inventory",
-                    "stores", "value"):
-            if key in obj and isinstance(obj[key], list):
-                for item in obj[key]:
-                    yield from _iter_records(item)
-                return
-        yield obj
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from _iter_records(item)
+def fetch_inventory(store_numbers, product_codes):
+    """Query mystore for exact stores + products.
+    Returns list of normalized rows (one per store per product)."""
+    params = {
+        "storeNumbers": ",".join(store_numbers),
+        "productCodes": ",".join(product_codes),
+    }
+    data = _get(MYSTORE_URL, params)
+    if DEBUG:
+        print("[debug] mystore raw response:")
+        print(json.dumps(data, indent=2)[:3000])
 
+    rows = []
+    products = data.get("products", []) if isinstance(data, dict) else []
+    for p in products:
+        code = p.get("productId")
+        info = p.get("storeInfo")
+        if isinstance(info, dict):
+            rows.append(_store_row(code, info))
+        for nb in p.get("nearbyStores", []) or []:
+            if isinstance(nb, dict):
+                rows.append(_store_row(code, nb))
 
-def search_product_code(name):
-    """Resolve a product name to its ABC product code. Returns (code, label)
-    for the best match, or (None, None)."""
-    data = _get(PRODUCT_SEARCH_URL, params={"q": name, "page": 1, "size": 20})
-    best = None
-    for rec in _iter_records(data):
-        code = _find_first(rec, ["code", "productCode", "productNumber",
-                                 "itemNumber", "no", "id"])
-        label = _find_first(rec, ["name", "productName", "description",
-                                  "title"])
-        if code is None or label is None:
-            continue
-        label_l = str(label).lower()
-        # Prefer an exact-ish name match; fall back to first result.
-        if name.lower() in label_l:
-            return str(code), str(label)
-        if best is None:
-            best = (str(code), str(label))
-    if best:
-        return best
-    print(f"  [warn] no product match for {name!r}. Raw response head:")
-    print("  " + json.dumps(data)[:800])
-    return None, None
-
-
-def fetch_inventory(code):
-    """Return list of (store_label, quantity) for a product code."""
-    out = []
-    data = _get(STORE_INVENTORY_URL.format(code=code))
-    for rec in _iter_records(data):
-        qty = _find_first(rec, ["quantity", "onHand", "qty", "available",
-                                "stock", "inventory"])
-        store = _find_first(rec, ["storeName", "store", "address1", "address",
-                                  "city", "location", "storeNumber"])
-        if qty is None:
-            continue
-        try:
-            qty = int(float(qty))
-        except (TypeError, ValueError):
-            continue
-        out.append((str(store), qty))
-    if not out:
-        print(f"  [warn] no inventory rows for code {code}. Raw head:")
-        print("  " + json.dumps(data)[:800])
-    return out
+    if not rows and not DEBUG:
+        print("[warn] no rows parsed. Re-run with DEBUG_JSON=1. Head:")
+        print(json.dumps(data)[:1000])
+    return rows
 
 
 # ---------------------------------------------------------------------------
-# Notification
+# Notify
 # ---------------------------------------------------------------------------
-def send_text(subject, body):
+def send_text(body):
     to = os.environ.get("SMS_TO")
     user = os.environ.get("SMTP_USER")
     pw = os.environ.get("SMTP_PASS")
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SMTP_PORT", "587"))
     if not all([to, user, pw]):
-        print("  [warn] SMS not configured (SMS_TO/SMTP_USER/SMTP_PASS); "
-              "would have sent:")
-        print(f"  {subject} :: {body}")
+        print(f"[warn] SMS not configured; would have sent:\n  {body}")
         return
     msg = EmailMessage()
     msg["From"] = user
     msg["To"] = to
-    msg["Subject"] = subject
+    msg["Subject"] = "ABC Restock"
     msg.set_content(body)
     with smtplib.SMTP(host, port) as s:
         s.starttls()
         s.login(user, pw)
         s.send_message(msg)
-    print(f"  [sent] {body}")
+    print(f"[sent]\n  {body}")
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+def parse_products():
+    raw = os.environ.get("WATCH_PRODUCTS", "Eagle Rare=017766")
+    out = {}
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" in chunk:
+            name, code = chunk.rsplit("=", 1)
+            out[code.strip()] = name.strip()
+        else:
+            out[chunk] = chunk
+    return out
+
+
+def parse_stores():
+    return [s.strip() for s in
+            os.environ.get("STORE_NUMBERS", "327").split(",") if s.strip()]
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    # --- config diagnostics ---------------------------------------------
-    # Print whether each config value arrived. Secrets are masked by GitHub
-    # in logs, so showing presence/length is safe and tells us if a secret
-    # is missing or misnamed.
-    def _diag(label, val, secret=False):
-        if not val:
-            print(f"[config] {label}: <MISSING/EMPTY>")
-        elif secret:
-            print(f"[config] {label}: set (length {len(val)})")
-        else:
-            print(f"[config] {label}: {val!r}")
+    products = parse_products()            # code -> name
+    watched = parse_stores()               # list of store-number strings
+    watched_set = set(watched)
 
-    _diag("WATCH_PRODUCTS", os.environ.get("WATCH_PRODUCTS"))
-    _diag("WATCH_STORES", os.environ.get("WATCH_STORES"))
-    _diag("SMS_TO", os.environ.get("SMS_TO"), secret=True)
-    _diag("SMTP_USER", os.environ.get("SMTP_USER"), secret=True)
-    _diag("SMTP_PASS", os.environ.get("SMTP_PASS"), secret=True)
-    # --------------------------------------------------------------------
-
-    products = [p.strip() for p in
-                os.environ.get("WATCH_PRODUCTS", "Eagle Rare").split(",")
-                if p.strip()]
-    store_filters = [s.strip().lower() for s in
-                     os.environ.get("WATCH_STORES",
-                                    "Blacksburg,Christiansburg").split(",")
-                     if s.strip()]
-
-    print(f"[config] resolved products to watch: {products}")
-    print(f"[config] resolved store filters: {store_filters}")
+    print(f"[config] DEBUG_JSON={DEBUG}  ONLY_WATCHED={ONLY_WATCHED}")
+    print(f"[config] products (code->name): {products}")
+    print(f"[config] store numbers: {watched}")
+    for label, val in [("SMS_TO", os.environ.get("SMS_TO")),
+                       ("SMTP_USER", os.environ.get("SMTP_USER")),
+                       ("SMTP_PASS", os.environ.get("SMTP_PASS"))]:
+        print(f"[config] {label}: {'set' if val else '<MISSING>'}")
 
     state = load_state()
-    state.setdefault("codes", {})       # product name -> code
-    state.setdefault("qty", {})         # "code|store" -> last qty
+    state.setdefault("qty", {})            # "code|storeNumber" -> last qty
     alerts = []
 
-    for name in products:
-        print(f"[checking] {name}")
-        code = state["codes"].get(name)
-        if not code:
-            try:
-                code, label = search_product_code(name)
-            except Exception as e:
-                print(f"[error] product search failed for {name}: "
-                      f"{type(e).__name__}: {e}")
-                continue
-            if not code:
-                print(f"[skip] could not resolve product: {name}")
-                continue
-            state["codes"][name] = code
-            print(f"[resolved] {name} -> code {code} ({label})")
+    try:
+        rows = fetch_inventory(watched, list(products.keys()))
+    except Exception as e:
+        print(f"[error] inventory fetch failed: {type(e).__name__}: {e}")
+        save_state(state)
+        return
 
-        try:
-            rows = fetch_inventory(code)
-        except Exception as e:
-            print(f"[error] inventory fetch failed for {name}: "
-                  f"{type(e).__name__}: {e}")
+    print(f"[info] parsed {len(rows)} rows from API")
+
+    for row in rows:
+        code = row["product_code"]
+        store_no = row["store_number"]
+        if ONLY_WATCHED and store_no not in watched_set:
             continue
+        qty = row["qty"]
+        pname = products.get(code, code)
+        where = row["city"] or store_no
+        key = f"{code}|{store_no}"
+        prev = state["qty"].get(key)
+        state["qty"][key] = qty
 
-        print(f"[info] {name}: got {len(rows)} store rows before filtering")
-
-        for store, qty in rows:
-            # Only stores matching our city filters
-            if store_filters and not any(f in store.lower()
-                                         for f in store_filters):
-                continue
-            key = f"{code}|{store}"
-            prev = state["qty"].get(key)
-            state["qty"][key] = qty
-            if prev is None:
-                print(f"  [baseline] {name} @ {store}: {qty}")
-                continue
-            if qty > prev:
-                msg = f"RESTOCK: {name} @ {store} {prev}->{qty}"
-                print(f"  [ALERT] {msg}")
-                alerts.append(msg)
-            else:
-                print(f"  [ok] {name} @ {store}: {qty} (was {prev})")
-        time.sleep(1)  # be polite to the server
+        if prev is None:
+            print(f"  [baseline] {pname} @ {where} (store {store_no}): {qty}")
+        elif qty > prev:
+            msg = f"RESTOCK: {pname} @ {where} (store {store_no}) {prev}->{qty}"
+            print(f"  [ALERT] {msg}")
+            alerts.append(msg)
+        else:
+            print(f"  [ok] {pname} @ {where} (store {store_no}): {qty} (was {prev})")
 
     if alerts:
-        body = "\n".join(alerts)
-        send_text("ABC Restock", body)
+        send_text("\n".join(alerts))
 
     save_state(state)
     print("done.")
