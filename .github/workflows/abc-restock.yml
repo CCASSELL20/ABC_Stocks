@@ -1,0 +1,53 @@
+name: ABC Restock Watch
+
+on:
+  schedule:
+    # Every 15 minutes. Cron is in UTC. GitHub may delay scheduled runs
+    # during peak load, so don't expect perfectly even spacing.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+# Allow the workflow to push the updated state.json back to the repo.
+permissions:
+  contents: write
+
+# Prevent overlapping runs from racing on the state commit.
+concurrency:
+  group: abc-restock
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run watcher
+        env:
+          WATCH_PRODUCTS: ${{ secrets.WATCH_PRODUCTS }}
+          WATCH_STORES: ${{ secrets.WATCH_STORES }}
+          SMS_TO: ${{ secrets.SMS_TO }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: python abc_restock.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --staged --quiet; then
+            echo "No state change."
+          else
+            git commit -m "Update restock state [skip ci]"
+            git push
+          fi
