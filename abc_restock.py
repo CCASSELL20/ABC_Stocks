@@ -123,18 +123,8 @@ def _store_row(product_code, store_obj):
     }
 
 
-def fetch_inventory(store_numbers, product_codes):
-    """Query mystore for exact stores + products.
-    Returns list of normalized rows (one per store per product)."""
-    params = {
-        "storeNumbers": ",".join(store_numbers),
-        "productCodes": ",".join(product_codes),
-    }
-    data = _get(MYSTORE_URL, params)
-    if DEBUG:
-        print("[debug] mystore raw response:")
-        print(json.dumps(data, indent=2)[:3000])
-
+def _parse_products_response(data):
+    """Pull normalized rows out of one mystore response."""
     rows = []
     products = data.get("products", []) if isinstance(data, dict) else []
     for p in products:
@@ -145,11 +135,44 @@ def fetch_inventory(store_numbers, product_codes):
         for nb in p.get("nearbyStores", []) or []:
             if isinstance(nb, dict):
                 rows.append(_store_row(code, nb))
-
-    if not rows and not DEBUG:
-        print("[warn] no rows parsed. Re-run with DEBUG_JSON=1. Head:")
-        print(json.dumps(data)[:1000])
     return rows
+
+
+def fetch_inventory(store_numbers, product_codes):
+    """Query mystore once PER STORE so a single invalid store number doesn't
+    400 the whole batch. Returns normalized rows (one per store per product).
+
+    Note: the API also volunteers nearbyStores for each queried store; those
+    get filtered out later unless ONLY_WATCHED is disabled."""
+    all_rows = []
+    seen = set()  # dedupe (code, store) since nearby lists overlap
+    codes_param = ",".join(product_codes)
+
+    for store in store_numbers:
+        params = {"storeNumbers": store, "productCodes": codes_param}
+        try:
+            data = _get(MYSTORE_URL, params)
+        except requests.HTTPError as e:
+            print(f"[skip] store {store}: rejected by API ({e})")
+            continue
+        except requests.RequestException as e:
+            print(f"[skip] store {store}: request failed ({e})")
+            continue
+
+        if DEBUG:
+            print(f"[debug] store {store} raw response:")
+            print(json.dumps(data, indent=2)[:1500])
+
+        for row in _parse_products_response(data):
+            key = (row["product_code"], row["store_number"])
+            if key in seen:
+                continue
+            seen.add(key)
+            all_rows.append(row)
+
+    if not all_rows:
+        print("[warn] no rows parsed from any store.")
+    return all_rows
 
 
 # ---------------------------------------------------------------------------
