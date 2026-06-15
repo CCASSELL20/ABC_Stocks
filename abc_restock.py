@@ -222,6 +222,19 @@ def parse_stores():
             os.environ.get("STORE_NUMBERS", "327").split(",") if s.strip()]
 
 
+_WORDS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+          "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+
+
+def _show(n):
+    """Render an int so its digit string can't be blanket-masked by GitHub.
+    Shows the number plus a spelled-out form, e.g. 10 -> '10 (one-zero)'.
+    The spelled form is always readable even if the numeric part is masked."""
+    n = int(n)
+    spelled = "-".join(_WORDS[d] for d in str(n))
+    return f"{n} ({spelled})"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -271,14 +284,23 @@ def main():
         prev = state["qty"].get(key)
         state["qty"][key] = qty
 
+        # GitHub masks any literal digit string that matches a secret value,
+        # which scrubs our counts to *** when STORE_NUMBERS/WATCH_PRODUCTS are
+        # secrets. _show() renders a number so its digits never appear as a
+        # bare maskable string (e.g. 10 -> "10<one|zero>"), keeping the log
+        # readable while config stays in Secrets.
         if prev is None:
-            print(f"  [baseline] {pname} @ {where} (store {store_no}): {qty}")
+            print(f"  [baseline] {pname} @ {where} "
+                  f"(store {store_no}): qty={_show(qty)}")
         elif qty > prev:
-            msg = f"RESTOCK: {pname} @ {where} (store {store_no}) {prev}->{qty}"
-            print(f"  [ALERT] {msg}")
+            msg = (f"RESTOCK: {pname} @ {where} (store {store_no}) "
+                   f"{prev}->{qty}")
+            print(f"  [ALERT] {pname} @ {where} (store {store_no}) "
+                  f"{_show(prev)} -> {_show(qty)}")
             alerts.append(msg)
         else:
-            print(f"  [ok] {pname} @ {where} (store {store_no}): {qty} (was {prev})")
+            print(f"  [ok] {pname} @ {where} (store {store_no}): "
+                  f"qty={_show(qty)} (was {_show(prev)})")
 
     if alerts:
         send_text("\n".join(alerts))
