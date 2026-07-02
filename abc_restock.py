@@ -182,8 +182,10 @@ def send_text(body):
     to = os.environ.get("SMS_TO")
     user = os.environ.get("SMTP_USER")
     pw = os.environ.get("SMTP_PASS")
-    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    port = int(os.environ.get("SMTP_PORT", "587"))
+    # Treat empty strings as unset — an empty SMTP_PORT secret would otherwise
+    # crash int(""). "or" falls back to the default when the value is "".
+    host = os.environ.get("SMTP_HOST") or "smtp.gmail.com"
+    port = int(os.environ.get("SMTP_PORT") or "587")
     if not all([to, user, pw]):
         print(f"[warn] SMS not configured; would have sent:\n  {body}")
         return
