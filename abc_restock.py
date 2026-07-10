@@ -225,15 +225,17 @@ def parse_stores():
 
 
 _WORDS = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
-          "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+          "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+          "-": "neg"}
 
 
 def _show(n):
     """Render an int so its digit string can't be blanket-masked by GitHub.
     Shows the number plus a spelled-out form, e.g. 10 -> '10 (one-zero)'.
-    The spelled form is always readable even if the numeric part is masked."""
+    Handles negatives (e.g. -1 -> '-1 (neg-one)'); any unmapped char falls
+    back to itself so this can never crash."""
     n = int(n)
-    spelled = "-".join(_WORDS[d] for d in str(n))
+    spelled = "-".join(_WORDS.get(d, d) for d in str(n))
     return f"{n} ({spelled})"
 
 
@@ -279,7 +281,10 @@ def main():
         store_no = row["store_number"]
         if ONLY_WATCHED and store_no not in watched_set:
             continue
-        qty = row["qty"]
+        # Inventory systems sometimes report negative on-hand (returns, data
+        # glitches). Treat anything below zero as zero so a -2 -> 0 correction
+        # isn't mistaken for a restock.
+        qty = max(0, row["qty"])
         pname = products.get(code, code)
         where = row["city"] or store_no
         key = f"{code}|{store_no}"
@@ -289,8 +294,8 @@ def main():
         # GitHub masks any literal digit string that matches a secret value,
         # which scrubs our counts to *** when STORE_NUMBERS/WATCH_PRODUCTS are
         # secrets. _show() renders a number so its digits never appear as a
-        # bare maskable string (e.g. 10 -> "10<one|zero>"), keeping the log
-        # readable while config stays in Secrets.
+        # bare maskable string, keeping the log readable while config stays in
+        # Secrets.
         if prev is None:
             print(f"  [baseline] {pname} @ {where} "
                   f"(store {store_no}): qty={_show(qty)}")
